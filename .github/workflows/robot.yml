@@ -1,0 +1,83 @@
+# .github/workflows/robot.yml  (this repository is the robot/ folder of the tool)
+#
+# The Summer Soccer tool's robot: one cycle of its automatic work every ten
+# minutes, with nobody's browser open. What a cycle does is decided by the
+# page itself (robotRun in the deployed site); this file only runs it.
+#
+# The two cron lines together cover 6am-11pm Sydney whether daylight saving
+# is on (UTC+11) or off (UTC+10): 19:00-13:00 UTC. run.js checks the exact
+# Sydney hour and exits at once outside 6am-11pm, so the extra runs at the
+# edges cost a few seconds each. GitHub's scheduler is best effort: runs are
+# often 5-15 minutes late and are dropped, not queued, when GitHub is busy.
+#
+# Secrets (Settings -> Secrets and variables -> Actions -> Secrets):
+#   SS_PASSWORD      the tool's shared password
+#   JOTFORM_KEY      the Jotform API key
+# Variables (same page -> Variables):
+#   SS_SITE_URL      https://mvfc-summer-soccer-tool.netlify.app/
+#   SS_WORKER_URL    https://summer-fixtures-sync.mossvalefc.workers.dev
+#   SS_SEASON_ID     the season id from the tool's Sync box
+#   JOTFORM_FORM_ID  the nominations form id
+#
+# This repository is public (so the runs cost nothing) and so are its logs:
+# run.js prints counts only, never a name or an address.
+name: robot
+
+on:
+  schedule:
+    - cron: '*/10 19-23 * * *'
+    - cron: '*/10 0-12 * * *'
+    # once a day, a commit so GitHub does not switch the schedule off after
+    # 60 days without activity (public repositories)
+    - cron: '5 20 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run now even outside 6am-11pm Sydney'
+        type: boolean
+        default: true
+
+# One cycle at a time. A late run that lands on top of the next one waits
+# rather than publishing the Sheet in parallel with it.
+concurrency:
+  group: robot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: One cycle
+        env:
+          SS_SITE_URL: ${{ vars.SS_SITE_URL }}
+          SS_WORKER_URL: ${{ vars.SS_WORKER_URL }}
+          SS_SEASON_ID: ${{ vars.SS_SEASON_ID }}
+          JOTFORM_FORM_ID: ${{ vars.JOTFORM_FORM_ID }}
+          SS_PASSWORD: ${{ secrets.SS_PASSWORD }}
+          JOTFORM_KEY: ${{ secrets.JOTFORM_KEY }}
+          ROBOT_FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '' }}
+        run: node run.js
+
+  keepalive:
+    if: github.event_name == 'schedule' && github.event.schedule == '5 20 * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit so the schedule stays enabled
+        run: |
+          git config user.name 'summer-soccer-robot'
+          git config user.email 'robot@users.noreply.github.com'
+          git commit --allow-empty -m "keepalive $(date -u +%F)"
+          git push
