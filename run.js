@@ -1,0 +1,146 @@
+/* robot/run.js -- one cycle of the tool's automatic work, with no browser open.
+
+   Opens the deployed page in a simulated browser (JSDOM -- the same thing the
+   test suite runs the page in), as a committee member called "Robot", lets
+   the page run ONE cycle of what every open browser already does on its own
+   timers (the form pulls, the Dribl read, the Sheet both ways), waits for the
+   page to say it has finished, prints a summary of counts, and exits.
+
+   Nothing that is a button for a person happens here: the page decides what
+   the cycle contains (see robotRun() in the page), and this file only opens
+   it and reads the report. The page is fetched from its live address on
+   every run, so deploying the site is the only way the robot's behaviour
+   changes -- there is no second copy of the tool's logic in this repository.
+
+   Configuration comes from the environment (GitHub secrets and variables):
+
+     SS_SITE_URL        the tool's address (the Netlify site)
+     SS_WORKER_URL      the sync worker's address (…workers.dev)
+     SS_SEASON_ID       the season id, as shown in the tool's Sync box
+     SS_PASSWORD        the tool's shared password           (secret)
+     JOTFORM_KEY        the Jotform API key                  (secret)
+     JOTFORM_FORM_ID    the nominations form id
+     ROBOT_HOURS        "6-23" -- Sydney hours it runs in (default 6-23)
+     ROBOT_FORCE        "1" to run outside those hours
+     ROBOT_TIMEOUT_MS   how long to wait for the page (default 240000)
+     ROBOT_PAGE_FILE    a local copy of the page instead of SS_SITE_URL (tests)
+
+   Exit code 0 on a good run, 1 on a failed one, 2 on a timeout, so a
+   scheduled run that fails shows red on GitHub and e-mails whoever set the
+   workflow up. The log carries counts only, never a name or an address:
+   this repository is public and so are its logs.                        */
+'use strict';
+/* In the repository, jsdom is installed here. In the tool's folder on a
+   committee laptop, where tests/robot.js runs this file, it is installed
+   under tests/ instead. */
+const { JSDOM } = (() => {
+  try { return require('jsdom'); }
+  catch(e){ return require(require('path').join(__dirname, '..', 'tests', 'node_modules', 'jsdom')); }
+})();
+
+function sydneyHour(now){
+  const s = new Intl.DateTimeFormat('en-AU', { timeZone: 'Australia/Sydney', hour: 'numeric', hour12: false }).format(now || new Date());
+  return parseInt(s, 10) % 24;
+}
+function inHours(spec, now){
+  const m = /^(\d{1,2})\s*-\s*(\d{1,2})$/.exec(String(spec || '6-23').trim());
+  const from = m ? +m[1] : 6, to = m ? +m[2] : 23;
+  const h = sydneyHour(now);
+  return h >= from && h < to;
+}
+
+/* Only numbers and short error strings leave this process. The page's own
+   report can carry a note like "3 new, 1 changed", which is fine, but an
+   error from the worker or Jotform is cut short and never echoed whole. */
+function publicSummary(rep){
+  const out = { ok: !!rep.ok, ms: rep.ms || 0, steps: {}, errors: (rep.errors || []).map(e => String(e).slice(0, 160)) };
+  Object.keys(rep.steps || {}).forEach(k => {
+    const s = rep.steps[k] || {};
+    const o = {};
+    Object.keys(s).forEach(f => {
+      const v = s[f];
+      if (typeof v === 'number' || typeof v === 'boolean') o[f] = v;
+      else if (f === 'skipped') o.skipped = String(v).slice(0, 80);
+      else if (f === 'error') o.error = String(v).slice(0, 160);
+    });
+    out.steps[k] = o;
+  });
+  return out;
+}
+
+/* Runs the page once. `fetchImpl` is what the page's fetch() becomes --
+   Node's own fetch in production, a fake in the tests. Resolves with the
+   page's report (or a timeout report); never throws for a page-side failure. */
+async function runRobot(opts){
+  const { html, siteUrl, workerUrl, seasonId, password, jotformKey, jotformFormId } = opts;
+  const fetchImpl = opts.fetch || globalThis.fetch;
+  const timeoutMs = opts.timeoutMs || 240000;
+  const name = opts.name || 'Robot';
+  const dom = new JSDOM(html, {
+    runScripts: 'dangerously', pretendToBeVisual: true, url: siteUrl,
+    beforeParse(w){
+      w.__ROBOT__ = { at: Date.now() };
+      w.fetch = (url, init) => fetchImpl(String(url), init);
+      /* What a committee member's browser would hold after they had set the
+         tool up once: the sync box, the session's password, the Jotform key.
+         A fresh profile every run, so nothing accumulates. */
+      w.localStorage.setItem('ss-cloud-cfg', JSON.stringify({ url: workerUrl, seasonId, name }));
+      w.sessionStorage.setItem('ss-cloud-pass', password || '');
+      w.localStorage.setItem('jotform-config-v1', JSON.stringify({
+        apiKey: jotformKey || '', formId: jotformFormId || '', auto: true, intervalMin: 5, v: 3 }));
+      /* The page's own console is noise here (render timings, warnings from
+         CSS jsdom cannot parse). Errors still surface through the report. */
+      w.console.log = () => {}; w.console.warn = () => {}; w.console.info = () => {};
+    }
+  });
+  const w = dom.window;
+  const started = Date.now();
+  let rep;
+  try {
+    rep = await new Promise(resolve => {
+      const tick = () => {
+        if (w.__ROBOT_DONE__) return resolve(w.__ROBOT_DONE__);
+        if (Date.now() - started > timeoutMs)
+          return resolve({ ok: false, timeout: true, ms: Date.now() - started, steps: {}, errors: ['timed out after ' + Math.round(timeoutMs / 1000) + ' s'] });
+        setTimeout(tick, 250);
+      };
+      tick();
+    });
+  } finally {
+    try { w.close(); } catch(e){}
+  }
+  return rep;
+}
+
+async function main(){
+  const env = process.env;
+  const now = new Date();
+  if (!env.ROBOT_FORCE && !inHours(env.ROBOT_HOURS, now)){
+    console.log(JSON.stringify({ skipped: 'outside hours', sydneyHour: sydneyHour(now) }));
+    return 0;
+  }
+  const missing = ['SS_WORKER_URL', 'SS_SEASON_ID', 'SS_PASSWORD'].filter(k => !env[k]);
+  if (missing.length){ console.log(JSON.stringify({ ok: false, errors: ['missing: ' + missing.join(', ')] })); return 1; }
+  const siteUrl = env.SS_SITE_URL || 'https://mvfc-summer-soccer-tool.netlify.app/';
+  let html;
+  if (env.ROBOT_PAGE_FILE) html = require('fs').readFileSync(env.ROBOT_PAGE_FILE, 'utf8');
+  else {
+    const res = await fetch(siteUrl, { headers: { 'Cache-Control': 'no-cache' } });
+    if (!res.ok){ console.log(JSON.stringify({ ok: false, errors: ['page fetch: HTTP ' + res.status] })); return 1; }
+    html = await res.text();
+  }
+  const rep = await runRobot({
+    html, siteUrl, workerUrl: env.SS_WORKER_URL, seasonId: env.SS_SEASON_ID, password: env.SS_PASSWORD,
+    jotformKey: env.JOTFORM_KEY, jotformFormId: env.JOTFORM_FORM_ID,
+    timeoutMs: Number(env.ROBOT_TIMEOUT_MS) || undefined
+  });
+  const summary = publicSummary(rep);
+  summary.sydneyHour = sydneyHour(now);
+  console.log(JSON.stringify(summary));
+  return rep.timeout ? 2 : rep.ok ? 0 : 1;
+}
+
+module.exports = { runRobot, publicSummary, inHours, sydneyHour };
+if (require.main === module){
+  main().then(code => process.exit(code), e => { console.log(JSON.stringify({ ok: false, errors: [String(e && e.message || e).slice(0, 160)] })); process.exit(1); });
+}
