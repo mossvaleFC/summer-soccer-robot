@@ -1,0 +1,8 @@
+{
+  "name": "summer-soccer-robot",
+  "private": true,
+  "description": "Runs one cycle of the Summer Soccer tool's automatic work in a simulated browser, on a schedule.",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node run.js" },
+  "dependencies": { "jsdom": "^30.0.1" }
+}
