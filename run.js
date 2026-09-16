@@ -54,6 +54,8 @@ function inHours(spec, now){
    error from the worker or Jotform is cut short and never echoed whole. */
 function publicSummary(rep){
   const out = { ok: !!rep.ok, ms: rep.ms || 0, steps: {}, errors: (rep.errors || []).map(e => String(e).slice(0, 160)) };
+  if (rep.persistent && rep.persistent.length) out.persistent = rep.persistent.map(String);
+  if (rep.failStreak) out.failStreak = rep.failStreak;
   Object.keys(rep.steps || {}).forEach(k => {
     const s = rep.steps[k] || {};
     const o = {};
@@ -62,6 +64,7 @@ function publicSummary(rep){
       if (typeof v === 'number' || typeof v === 'boolean') o[f] = v;
       else if (f === 'skipped') o.skipped = String(v).slice(0, 80);
       else if (f === 'error') o.error = String(v).slice(0, 160);
+      else if (f === 'warning') o.warning = String(v).slice(0, 160);
     });
     out.steps[k] = o;
   });
