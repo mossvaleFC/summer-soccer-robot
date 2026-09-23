@@ -22,7 +22,7 @@
      JOTFORM_FORM_ID    the nominations form id
      ROBOT_HOURS        "6-23" -- Sydney hours it runs in (default 6-23)
      ROBOT_FORCE        "1" to run outside those hours
-     ROBOT_TIMEOUT_MS   how long to wait for the page (default 240000)
+     ROBOT_TIMEOUT_MS   how long to wait for the page (default 420000)
      ROBOT_PAGE_FILE    a local copy of the page instead of SS_SITE_URL (tests)
 
    Exit code 0 on a good run, 1 on a failed one, 2 on a timeout, so a
@@ -56,6 +56,10 @@ function publicSummary(rep){
   const out = { ok: !!rep.ok, ms: rep.ms || 0, steps: {}, errors: (rep.errors || []).map(e => String(e).slice(0, 160)) };
   if (rep.persistent && rep.persistent.length) out.persistent = rep.persistent.map(String);
   if (rep.failStreak) out.failStreak = rep.failStreak;
+  if (rep.progress && rep.progress.step) out.stuckIn = String(rep.progress.step).slice(0, 40);
+  if (rep.pending) out.pending = rep.pending.map(x => String(x).slice(0, 120)).slice(0, 8);
+  if (rep.last) out.last = rep.last.map(x => String(x).slice(0, 120));
+  if (rep.requests !== undefined) out.requests = rep.requests;
   Object.keys(rep.steps || {}).forEach(k => {
     const s = rep.steps[k] || {};
     const o = {};
@@ -77,13 +81,26 @@ function publicSummary(rep){
 async function runRobot(opts){
   const { html, siteUrl, workerUrl, seasonId, password, jotformKey, jotformFormId } = opts;
   const fetchImpl = opts.fetch || globalThis.fetch;
-  const timeoutMs = opts.timeoutMs || 240000;
+  const timeoutMs = opts.timeoutMs || 420000;
   const name = opts.name || 'Robot';
+  const trace = [];
   const dom = new JSDOM(html, {
     runScripts: 'dangerously', pretendToBeVisual: true, url: siteUrl,
     beforeParse(w){
-      w.__ROBOT__ = { at: Date.now() };
-      w.fetch = (url, init) => fetchImpl(String(url), init);
+      w.__ROBOT__ = { at: Date.now(), stepMs: opts.stepMs || undefined };
+      /* Every request the page makes, by host and path only (no query
+         string -- the Jotform key rides in one), with when it started and
+         whether it came back. When the page never finishes, the requests
+         still outstanding are the answer to "stuck where?", whatever the
+         page itself managed to report (23 Sep 2026). */
+      w.fetch = (url, init) => {
+        const u = String(url);
+        let path; try { const p = new URL(u); path = p.host + p.pathname; } catch(e){ path = u.slice(0, 80); }
+        const rec = { path, at: Date.now(), done: 0, status: 0 };
+        trace.push(rec);
+        return fetchImpl(u, init).then(r => { rec.done = Date.now(); rec.status = r.status; return r; },
+                                       e => { rec.done = Date.now(); rec.status = -1; throw e; });
+      };
       /* What a committee member's browser would hold after they had set the
          tool up once: the sync box, the session's password, the Jotform key.
          A fresh profile every run, so nothing accumulates. */
@@ -103,8 +120,18 @@ async function runRobot(opts){
     rep = await new Promise(resolve => {
       const tick = () => {
         if (w.__ROBOT_DONE__) return resolve(w.__ROBOT_DONE__);
-        if (Date.now() - started > timeoutMs)
-          return resolve({ ok: false, timeout: true, ms: Date.now() - started, steps: {}, errors: ['timed out after ' + Math.round(timeoutMs / 1000) + ' s'] });
+        if (Date.now() - started > timeoutMs){
+          /* Which step the page was in when the clock ran out, and for how
+             long: the difference between "the robot is slow" and "one call
+             never comes back" (23 Sep 2026). */
+          const p = w.__ROBOT_PROGRESS__ || null;
+          const where = p ? ' during ' + p.step + ' (' + Math.round((Date.now() - p.at) / 1000) + ' s in)' : ' (the page did not say which step)';
+          const now = Date.now();
+          const pending = trace.filter(r => !r.done).map(r => r.path + ' ' + Math.round((now - r.at) / 1000) + 's');
+          const last = trace.slice(-6).map(r => r.path + ' ' + (r.done ? r.status + ' ' + (r.done - r.at) + 'ms' : 'pending'));
+          return resolve({ ok: false, timeout: true, ms: now - started, steps: {}, progress: p, pending, last, requests: trace.length,
+                           errors: ['timed out after ' + Math.round(timeoutMs / 1000) + ' s' + where] });
+        }
         setTimeout(tick, 250);
       };
       tick();
