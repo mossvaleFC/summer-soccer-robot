@@ -74,7 +74,6 @@ function publicSummary(rep){
   });
   return out;
 }
-
 /* Runs the page once. `fetchImpl` is what the page's fetch() becomes --
    Node's own fetch in production, a fake in the tests. Resolves with the
    page's report (or a timeout report); never throws for a page-side failure. */
@@ -141,7 +140,6 @@ async function runRobot(opts){
   }
   return rep;
 }
-
 async function main(){
   const env = process.env;
   const now = new Date();
@@ -163,6 +161,15 @@ async function main(){
     const res = await fetch(siteUrl, { headers: { 'Cache-Control': 'no-cache', 'Accept': 'text/html,*/*',
       'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) SummerSoccerRobot/1.0 (+https://github.com/mossvaleFC/summer-soccer-robot)' } });
     page.status = res.status; page.type = String(res.headers.get('content-type') || '').slice(0, 60);
+    /* The response headers that say who answered and how (a CDN's request
+       id, an encoding, a cache verdict): the site is public, so these are
+       not secrets, and they are what tells a wrong answer from a wrong
+       reading of the right one. */
+    page.headers = {};
+    ['content-encoding', 'content-length', 'server', 'x-nf-request-id', 'cache-status', 'age', 'via', 'x-powered-by', 'location'].forEach(h => {
+      const v = res.headers.get(h); if (v) page.headers[h] = String(v).slice(0, 80);
+    });
+    page.finalUrl = String(res.url || '').slice(0, 120);
     if (!res.ok){ console.log(JSON.stringify({ ok: false, page, errors: ['page fetch: HTTP ' + res.status] })); return 1; }
     html = await res.text();
   }
@@ -170,6 +177,11 @@ async function main(){
   page.title = String((/<title>([^<]{0,80})/i.exec(html) || [])[1] || '').trim();
   page.isTool = html.indexOf('window.CLOUD') >= 0 && html.indexOf('robotRun') >= 0;
   if (!page.isTool){
+    /* The first line of whatever came back, so the log says what it was
+       (an error page, a challenge, a file that is not HTML) -- the public
+       page, never anything the robot was given. */
+    page.head = html.slice(0, 200).replace(/\s+/g, ' ');
+    page.bytes = Buffer.byteLength(html, 'utf8');
     console.log(JSON.stringify({ ok: false, page, errors: ['the page fetched is not the tool (no CLOUD/robotRun in it)'] }));
     return 1;
   }
