@@ -152,12 +152,26 @@ async function main(){
   const missing = ['SS_WORKER_URL', 'SS_SEASON_ID', 'SS_PASSWORD'].filter(k => !env[k]);
   if (missing.length){ console.log(JSON.stringify({ ok: false, errors: ['missing: ' + missing.join(', ')] })); return 1; }
   const siteUrl = env.SS_SITE_URL || 'https://mvfc-summer-soccer-tool.netlify.app/';
-  let html;
+  let html, page = { source: env.ROBOT_PAGE_FILE ? 'file' : 'site' };
   if (env.ROBOT_PAGE_FILE) html = require('fs').readFileSync(env.ROBOT_PAGE_FILE, 'utf8');
   else {
-    const res = await fetch(siteUrl, { headers: { 'Cache-Control': 'no-cache' } });
-    if (!res.ok){ console.log(JSON.stringify({ ok: false, errors: ['page fetch: HTTP ' + res.status] })); return 1; }
+    /* Fetched the way a browser would ask for it. What comes back is checked
+       before it is run: a page that is not the tool (a host's challenge or
+       error page answered with 200, an empty deploy) used to be loaded
+       anyway and waited on for the full clock, with nothing to say why
+       (23 Sep 2026: seventy runs of "0 requests"). */
+    const res = await fetch(siteUrl, { headers: { 'Cache-Control': 'no-cache', 'Accept': 'text/html,*/*',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) SummerSoccerRobot/1.0 (+https://github.com/mossvaleFC/summer-soccer-robot)' } });
+    page.status = res.status; page.type = String(res.headers.get('content-type') || '').slice(0, 60);
+    if (!res.ok){ console.log(JSON.stringify({ ok: false, page, errors: ['page fetch: HTTP ' + res.status] })); return 1; }
     html = await res.text();
+  }
+  page.chars = html.length;
+  page.title = String((/<title>([^<]{0,80})/i.exec(html) || [])[1] || '').trim();
+  page.isTool = html.indexOf('window.CLOUD') >= 0 && html.indexOf('robotRun') >= 0;
+  if (!page.isTool){
+    console.log(JSON.stringify({ ok: false, page, errors: ['the page fetched is not the tool (no CLOUD/robotRun in it)'] }));
+    return 1;
   }
   const rep = await runRobot({
     html, siteUrl, workerUrl: env.SS_WORKER_URL, seasonId: env.SS_SEASON_ID, password: env.SS_PASSWORD,
@@ -166,6 +180,7 @@ async function main(){
   });
   const summary = publicSummary(rep);
   summary.sydneyHour = sydneyHour(now);
+  summary.page = page;
   console.log(JSON.stringify(summary));
   return rep.timeout ? 2 : rep.ok ? 0 : 1;
 }
