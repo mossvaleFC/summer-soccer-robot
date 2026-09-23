@@ -33,9 +33,21 @@
 /* In the repository, jsdom is installed here. In the tool's folder on a
    committee laptop, where tests/robot.js runs this file, it is installed
    under tests/ instead. */
-const { JSDOM } = (() => {
-  try { return require('jsdom'); }
-  catch(e){ return require(require('path').join(__dirname, '..', 'tests', 'node_modules', 'jsdom')); }
+const dep = (name) => {
+  try { return require(name); }
+  catch(e){ return require(require('path').join(__dirname, '..', 'tests', 'node_modules', name)); }
+};
+const { JSDOM } = dep('jsdom');
+/* Every request the robot makes goes through the fetch of the undici package
+   that jsdom brings in, not Node's own. The two share one global
+   "dispatcher", and undici 8.11.0 (published 22 Sep 2026) hands Node's fetch
+   a wrapper it misreads: every response comes back with no headers and its
+   body still compressed. For three days the robot fetched 635 KB of brotli,
+   parsed it as a page with no scripts in it, and waited 420 s for a report
+   that could never come. The package's fetch matches its own dispatcher,
+   whatever version npm installs. */
+const NODE_FETCH = (() => {
+  try { return dep('undici').fetch; } catch(e){ return globalThis.fetch; }
 })();
 
 function sydneyHour(now){
@@ -74,12 +86,14 @@ function publicSummary(rep){
   });
   return out;
 }
+
 /* Runs the page once. `fetchImpl` is what the page's fetch() becomes --
-   Node's own fetch in production, a fake in the tests. Resolves with the
-   page's report (or a timeout report); never throws for a page-side failure. */
+   undici's fetch in production (NODE_FETCH above), a fake in the tests.
+   Resolves with the page's report (or a timeout report); never throws for a
+   page-side failure. */
 async function runRobot(opts){
   const { html, siteUrl, workerUrl, seasonId, password, jotformKey, jotformFormId } = opts;
-  const fetchImpl = opts.fetch || globalThis.fetch;
+  const fetchImpl = opts.fetch || NODE_FETCH;
   const timeoutMs = opts.timeoutMs || 420000;
   const name = opts.name || 'Robot';
   const trace = [];
@@ -140,6 +154,7 @@ async function runRobot(opts){
   }
   return rep;
 }
+
 async function main(){
   const env = process.env;
   const now = new Date();
@@ -158,7 +173,7 @@ async function main(){
        error page answered with 200, an empty deploy) used to be loaded
        anyway and waited on for the full clock, with nothing to say why
        (23 Sep 2026: seventy runs of "0 requests"). */
-    const res = await fetch(siteUrl, { headers: { 'Cache-Control': 'no-cache', 'Accept': 'text/html,*/*',
+    const res = await NODE_FETCH(siteUrl, { headers: { 'Cache-Control': 'no-cache', 'Accept': 'text/html,*/*',
       'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) SummerSoccerRobot/1.0 (+https://github.com/mossvaleFC/summer-soccer-robot)' } });
     page.status = res.status; page.type = String(res.headers.get('content-type') || '').slice(0, 60);
     /* The response headers that say who answered and how (a CDN's request
