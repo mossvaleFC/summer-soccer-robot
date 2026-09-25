@@ -36,6 +36,10 @@ on:
         description: 'Run now even outside 6am-11pm Sydney'
         type: boolean
         default: true
+      only:
+        description: 'Only these steps (sheet-trigger.gs sends "sheet")'
+        type: string
+        default: ''
 
 # One cycle at a time. A late run that lands on top of the next one waits
 # rather than publishing the Sheet in parallel with it.
@@ -65,6 +69,7 @@ jobs:
           SS_PASSWORD: ${{ secrets.SS_PASSWORD }}
           JOTFORM_KEY: ${{ secrets.JOTFORM_KEY }}
           ROBOT_FORCE: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && '1' || '' }}
+          ROBOT_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
         run: node run.js
 
   keepalive:
