@@ -23,6 +23,8 @@
      ROBOT_HOURS        "6-23" -- Sydney hours it runs in (default 6-23)
      ROBOT_FORCE        "1" to run outside those hours
      ROBOT_TIMEOUT_MS   how long to wait for the page (default 420000)
+     ROBOT_ONLY         "sheet" -- only the Sheet step, publishing regardless
+                        (a run started by an edit in the Sheet)
      ROBOT_PAGE_FILE    a local copy of the page instead of SS_SITE_URL (tests)
 
    Exit code 0 on a good run, 1 on a failed one, 2 on a timeout, so a
@@ -72,6 +74,7 @@ function publicSummary(rep){
   if (rep.pending) out.pending = rep.pending.map(x => String(x).slice(0, 120)).slice(0, 8);
   if (rep.last) out.last = rep.last.map(x => String(x).slice(0, 120));
   if (rep.requests !== undefined) out.requests = rep.requests;
+  if (rep.only && rep.only.length) out.only = rep.only.map(String);
   Object.keys(rep.steps || {}).forEach(k => {
     const s = rep.steps[k] || {};
     const o = {};
@@ -100,7 +103,7 @@ async function runRobot(opts){
   const dom = new JSDOM(html, {
     runScripts: 'dangerously', pretendToBeVisual: true, url: siteUrl,
     beforeParse(w){
-      w.__ROBOT__ = { at: Date.now(), stepMs: opts.stepMs || undefined };
+      w.__ROBOT__ = { at: Date.now(), stepMs: opts.stepMs || undefined, only: opts.only || '' };
       /* Every request the page makes, by host and path only (no query
          string -- the Jotform key rides in one), with when it started and
          whether it came back. When the page never finishes, the requests
@@ -203,7 +206,10 @@ async function main(){
   const rep = await runRobot({
     html, siteUrl, workerUrl: env.SS_WORKER_URL, seasonId: env.SS_SEASON_ID, password: env.SS_PASSWORD,
     jotformKey: env.JOTFORM_KEY, jotformFormId: env.JOTFORM_FORM_ID,
-    timeoutMs: Number(env.ROBOT_TIMEOUT_MS) || undefined
+    timeoutMs: Number(env.ROBOT_TIMEOUT_MS) || undefined,
+    /* "sheet" when the run was started by an edit in the Sheet
+       (sheet-trigger.gs): the page does the Sheet step and nothing else. */
+    only: String(env.ROBOT_ONLY || '').replace(/[^a-z,]/g, '')
   });
   const summary = publicSummary(rep);
   summary.sydneyHour = sydneyHour(now);
